@@ -1,5 +1,44 @@
-*.class
+# Global .gitignore
+
+## Dirs
+node_modules
+tmp
+temp
+
+## Generic
+*~
+*.lock
+*.DS_Store
+*.swp
+
+lib-cov
+*.seed
 *.log
+*.csv
+*.dat
+*.out
+*.pid
+*.gz
+
+pids
+logs
+results
+
+## Logging
+*.log
+
+## Java
+*.class
+
+## Python
+*.pyc
+
+## NodeJS Specific
+.migrate
+npm-debug.log
+
+## Misc
+.sass-cache
 
 # sbt specific
 dist/*
@@ -11,3 +50,11 @@ project/plugins/project/
 
 # Scala-IDE specific
 .scala_dependencies
+
+## Intellij
+.idea
+.idea_modules
+.classpath
+.project
+project/target
+project/project
