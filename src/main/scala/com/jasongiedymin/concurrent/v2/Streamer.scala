@@ -56,7 +56,11 @@ trait Data[A] {
  */
 trait DataContainer[A] extends Data[A] {
   val value:DataType
-  def getValue: DataType = value
+}
+
+abstract class GeneratorHelper[A] extends Data[A] {
+  import scala.collection.JavaConverters._
+  def generateHelper(input: java.util.List[A]): InputStream = input.asScala.toStream
 }
 
 /**
@@ -68,7 +72,7 @@ trait Generator[A] extends Data[A] {
   def generate:InputStream
 }
 
-trait FrameworkSettings {
+abstract class FrameworkSettings[A] extends Data[A] {
 
   /**
    * Time for warming up the framework
@@ -97,10 +101,10 @@ trait FrameworkSettings {
   val jvmReserve:Int = 1
   val reserveCPUs:Int = osReserve + jvmReserve
   val systemCPUs = Runtime.getRuntime.availableProcessors()
-  val appCPUs = systemCPUs - reserveCPUs
-  val workerSaturation:Double = .5
+  val appCPUs = (systemCPUs - reserveCPUs)
+  val workerSaturation:Double = .8
   def workers:Int = (appCPUs * workerSaturation).toInt // !! Thinking of overriding values??? Do it in the Impl instead.
-  def successors:Int = appCPUs - workers // lower this number to see the queue build up
+  def successors:Int = (appCPUs - workers) // lower this number to see the queue build up
   def workerTimeout:Duration = Duration.Inf //1.second // work must complete within this time
   //def successorTimeout:Duration = Duration.Inf //1.second // successor must complete within this time
   def appTimeout:Duration = Duration.Inf // app timeout
@@ -111,6 +115,17 @@ trait FrameworkSettings {
   //reserved
   //var ecApp = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(1)) // dedicated for app
 
+  def status() {
+    println("System CPUS: %s" format systemCPUs)
+    println("App CPUS: %s" format appCPUs)
+    println("Reserve CPUS (OS + JVM): %s" format reserveCPUs)
+    println("  worker saturation: [%s]" format workerSaturation)
+    println("  workers: [%s]" format workers)
+    println("  successors: [%s]" format successors)
+    println("  worker timeout: [%s]" format workerTimeout)
+    println("  app timeout: [%s]" format appTimeout)
+  }
+
   def shutdown() {
     ecSuccessors.shutdown()
     ecWorkers.shutdown()
@@ -119,9 +134,27 @@ trait FrameworkSettings {
 
 }
 
-trait Worker[A] extends Data[A] with FrameworkSettings {
+trait Worker[A] extends FrameworkSettings[A] {
   def work(input:DataType): Possible
   def complete(value:DataType): Possible
+}
+
+abstract class Framework[A] extends FrameworkSettings[A] with Worker[A] {
+  def distribute(inputStream:InputStream)(implicit ec: ExecutionContext = ecWorkers): FutureOutput = {
+    warmup()
+
+    lazy val ret = for ( i<-inputStream ) yield {
+      println("-> promising data: %s" format i)
+      future { work(i) }
+      // The reason we don't do the following is success() will
+      // end up sharing work()'s thread pool and may be scheduled
+      // much much later.
+      // andThen {
+        //case _ => success(_) // naive match
+      //}
+    }
+    ret
+  }
 
   protected def success(result:FutureData): Possible = {
     // We still have a streaming promise at this point
@@ -151,8 +184,9 @@ trait Worker[A] extends Data[A] with FrameworkSettings {
         }
         val end = timing
         val usage = busyCPUs(start, end)
-        if (usage < workers)
-          println("==== [ %s/%s CPUs Utilized ] ==== - consider increasing successors thread count to match workers. If at tail end of data, ignore this suggestion" format (usage,availableProcessors))
+
+        //if (usage < workers) // seems to only work for scala
+        //  println("==== [ %s/%s CPUs Utilized ] ==== - consider increasing successors thread count to match workers. If at tail end of data, ignore this suggestion" format (usage,availableProcessors))
 
         blockingResult
       }
@@ -162,24 +196,6 @@ trait Worker[A] extends Data[A] with FrameworkSettings {
       }
     }
 
-    ret
-  }
-}
-
-abstract class Framework[A] extends FrameworkSettings with Worker[A] {
-  def distribute(inputStream:InputStream)(implicit ec: ExecutionContext = ecWorkers): FutureOutput = {
-    warmup()
-
-    lazy val ret = for ( i<-inputStream ) yield {
-      println("-> promising data: %s" format i)
-      future { work(i) }
-      // The reason we don't do the following is success() will
-      // end up sharing work()'s thread pool and may be scheduled
-      // much much later.
-      // andThen {
-        //case _ => success(_) // naive match
-      //}
-    }
     ret
   }
 
@@ -218,25 +234,6 @@ abstract class Framework[A] extends FrameworkSettings with Worker[A] {
  */
 class IntegerData(val value:Int) extends DataContainer[Int] {}
 
-/**
- * Example Usage of Generic Generator Companion.
- * This is our test data Generator.
- */
-object IntegerData extends Generator[Int] {
-  /**
-   * function to generate test data as a stream
-   * to simulate infinite data
-   * seemingly infinite, but definitely, finite :-)
-   *
-   * Not recommended, as it will always seem sequential due to worker
-   * using n*1000
-   * def generate = (1 to 10).toStream
-   *
-   * A good basic test to prove 1s execute first and 5 later
-   * def generate = Stream(5, 1, 1, 1)
-   */
-   def generate = (1 to 50)./*reverse.*/toStream
-}
 
 /**
  * Example Usage of Generic Worker trait.
@@ -264,24 +261,27 @@ trait FakeIntegerWorker extends Worker[Int] {
  * Example Usage of Generic Framework Companion with Worker mixed in.
  * This is our framework which will execute workers.
  */
-object IntegerFramework extends Framework[Int] with FakeIntegerWorker {
+object IntegerFramework extends Framework[Int] with Generator[Int] with FakeIntegerWorker with Data[Int] {
+  /**
+   * function to generate test data as a stream
+   * to simulate infinite data
+   * seemingly infinite, but definitely, finite :-)
+   *
+   * Not recommended, as it will always seem sequential due to worker
+   * using n*1000
+   * def generate = (1 to 10).toStream
+   *
+   * A good basic test to prove 1s execute first and 5 later
+   * def generate = Stream(5, 1, 1, 1)
+   */
+  def generate:InputStream = (1 to 50)./*reverse.*/toStream
+
   // override any options here such as timeouts and threads
   override def warmupTime = Some(1.second) //or None
   //override def workers:Int = (Runtime.getRuntime.availableProcessors() * .5 ).toInt - 1
   //override def successors:Int = Runtime.getRuntime.availableProcessors() - workers
   override def workerTimeout:Duration = Duration.Inf
   override def appTimeout:Duration = Duration.Inf
-
-  def status() {
-    println("System CPUS: %s" format systemCPUs)
-    println("App CPUS: %s" format appCPUs)
-    println("Reserve CPUS (OS + JVM): %s" format reserveCPUs)
-    println("  worker saturation: [%s]" format workerSaturation)
-    println("  workers: [%s]" format workers)
-    println("  successors: [%s]" format successors)
-    println("  worker timeout: [%s]" format workerTimeout)
-    println("  app timeout: [%s]" format appTimeout)
-  }
 }
 
 /**
@@ -290,9 +290,10 @@ object IntegerFramework extends Framework[Int] with FakeIntegerWorker {
 
 object Streamer {
   def start() {
+
     IntegerFramework.status()
 
-    lazy val data = IntegerData.generate // generate data
+    lazy val data = IntegerFramework.generate // generate data
     println("Generated Data: %s" format data) // prove it is data
 
     lazy val promises = IntegerFramework.distribute(data) // generate promises
